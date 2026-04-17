@@ -239,215 +239,490 @@
     chrome.runtime.sendMessage({ type: "REFRESH_USAGE" }).catch(() => {});
   }
 
+  function normalizeRect(r) {
+    const left = r.left;
+    const top = r.top;
+    const width = r.width;
+    const height = r.height;
+    return {
+      left,
+      top,
+      width,
+      height,
+      right: r.right ?? left + width,
+      bottom: r.bottom ?? top + height,
+    };
+  }
+
+  /** Inner rounded chat surface (Tailwind `!box-content`); falls back to container. */
+  function getChatBoxElement() {
+    const wrap = document.querySelector("[data-chat-input-container]");
+    if (wrap) {
+      const box = wrap.querySelector('[class*="box-content"]');
+      if (box) return box;
+    }
+    return (
+      document.querySelector(
+        "[data-chat-input-container] [class*='rounded-']",
+      ) || wrap
+    );
+  }
+
+  let chatInputResizeObs = null;
+  let chatInputObservedEl = null;
+
   function buildShadowHTML() {
     return `
       <style>
         :host { all: initial; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
         * { box-sizing: border-box; }
-        .panel {
+        .ct-surface {
           position: fixed;
-          bottom: max(12px, env(safe-area-inset-bottom, 0px));
-          left: 10px;
-          right: auto;
-          top: auto;
           z-index: 2147483646;
-          min-width: 200px;
-          /* Sits in the strip between Claude’s left sidebar and the chat column */
-          max-width: min(280px, calc(100vw - 24px));
-          background: ${theme.bg};
-          border: 1px solid ${theme.border};
-          border-radius: 12px;
-          box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 0 0 1px rgba(234, 88, 12, 0.12);
-          color: ${theme.text};
-          font-size: 12px;
-          line-height: 1.35;
-          overflow: hidden;
-          backdrop-filter: blur(10px);
+          pointer-events: none;
         }
-        @media (min-width: 768px) {
-          .panel {
-            left: 200px;
-            max-width: min(280px, calc(100vw - 252px));
-          }
+        .ct-surface.ct-zone {
+          pointer-events: auto;
         }
-        .head {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 8px;
-          padding: 8px 10px;
-          background: linear-gradient(180deg, ${theme.bgElevated} 0%, ${theme.bg} 100%);
-          border-bottom: 1px solid ${theme.border};
-        }
-        .brand {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          font-weight: 600;
-          letter-spacing: 0.02em;
-          font-size: 11px;
-          text-transform: uppercase;
-          color: ${theme.muted};
-        }
-        .brand svg { flex-shrink: 0; }
-        .actions { display: flex; gap: 4px; }
-        button.icon-btn {
-          display: grid;
-          place-items: center;
-          width: 28px;
-          height: 28px;
-          padding: 0;
-          border: none;
-          border-radius: 8px;
-          background: transparent;
-          color: ${theme.muted};
-          cursor: pointer;
-        }
-        button.icon-btn:hover { color: ${theme.orange}; background: rgba(234, 88, 12, 0.12); }
-        .body { padding: 10px 10px 12px; }
-        .body.collapsed { display: none; }
-        .row {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          margin-bottom: 10px;
-        }
-        .row:last-child { margin-bottom: 0; }
-        .label {
-          width: 52px;
-          flex-shrink: 0;
-          font-size: 10px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          color: ${theme.muted};
-        }
-        .bar-wrap { flex: 1; min-width: 0; }
-        .bar-track {
-          height: 6px;
+        .ct-liquid {
+          pointer-events: auto;
+          background: rgba(255, 255, 255, 0.06);
+          backdrop-filter: blur(20px) saturate(160%);
+          -webkit-backdrop-filter: blur(20px) saturate(160%);
+          border: 1px solid rgba(255, 255, 255, 0.14);
           border-radius: 999px;
-          background: ${theme.track};
+          box-shadow:
+            0 4px 24px rgba(0, 0, 0, 0.12),
+            inset 0 1px 0 rgba(255, 255, 255, 0.12);
+        }
+        .ct-liquid--dark {
+          background: rgba(15, 15, 14, 0.35);
+          border-color: rgba(255, 255, 255, 0.1);
+        }
+        .ct-row {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          padding: 4px 10px;
+          min-height: 26px;
+          width: 100%;
+        }
+        .ct-lab {
+          font-size: 8px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          color: rgba(255, 255, 255, 0.55);
+          flex-shrink: 0;
+        }
+        .bar-h-wrap { flex: 1; min-width: 28px; }
+        .bar-h-wrap--7d { max-width: 68px; flex: 0 1 auto; }
+        .bar-track-h {
+          height: 4px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.12);
           overflow: hidden;
         }
-        .bar-fill {
+        .bar-fill-h {
           height: 100%;
           border-radius: 999px;
           background: linear-gradient(90deg, #c2410c 0%, ${theme.orange} 55%, #fb923c 100%);
-          box-shadow: 0 0 12px ${theme.orangeDim};
+          box-shadow: 0 0 8px ${theme.orangeDim};
           transition: width 0.35s ease;
         }
-        .pct {
-          width: 36px;
-          text-align: right;
+        .bar-fill--7d {
+          background: linear-gradient(90deg, #9a3412 0%, ${theme.orange} 50%, #fdba74 100%);
+        }
+        .pct-h {
           font-variant-numeric: tabular-nums;
-          font-weight: 600;
-          color: ${theme.text};
-        }
-        .meta {
-          margin-top: 10px;
-          padding-top: 8px;
-          border-top: 1px solid ${theme.border};
+          font-weight: 700;
           font-size: 10px;
-          color: ${theme.muted};
-          display: flex;
-          justify-content: space-between;
-          gap: 8px;
+          color: rgba(255, 255, 255, 0.95);
+          min-width: 28px;
+          text-align: right;
+          flex-shrink: 0;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
         }
-        .pill {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
+        .ct-refresh-btn {
+          width: 22px;
+          height: 22px;
+          padding: 0;
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.08);
+          backdrop-filter: blur(20px) saturate(160%);
+          -webkit-backdrop-filter: blur(20px) saturate(160%);
+          color: rgba(255, 255, 255, 0.75);
+          display: grid;
+          place-items: center;
+          pointer-events: auto;
+          cursor: pointer;
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+          flex-shrink: 0;
         }
-        .state-msg {
-          padding: 12px 10px;
-          text-align: center;
-          color: ${theme.muted};
-          font-size: 11px;
+        .ct-refresh-btn:hover {
+          color: ${theme.orange};
+          border-color: rgba(234, 88, 12, 0.35);
+          background: rgba(234, 88, 12, 0.12);
         }
-        .state-msg strong { color: ${theme.orange}; font-weight: 600; }
-        .mini {
-          display: flex;
-          gap: 6px;
-          padding: 6px 8px;
-          justify-content: flex-end;
+        .ct-reset-pill {
+          font-size: 9px;
+          line-height: 1.35;
+          color: rgba(255, 255, 255, 0.92);
+          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+          padding: 5px 10px;
+          max-width: 38%;
+          word-break: break-word;
         }
-        .mini.hidden { display: none; }
-        .orb {
-          width: 36px;
-          height: 36px;
-          border-radius: 50%;
-          border: 2px solid ${theme.border};
+        .ct-reset-pill--r {
+          text-align: right;
+          margin-left: auto;
+        }
+        .ct-status-badge {
+          width: 42px;
+          height: 42px;
+          border-radius: 999px;
           display: grid;
           place-items: center;
           font-size: 10px;
-          font-weight: 700;
-          color: ${theme.text};
-          background: ${theme.bgElevated};
+          font-weight: 800;
+          color: rgba(255, 255, 255, 0.96);
+          text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+          box-shadow:
+            0 6px 18px rgba(0, 0, 0, 0.16),
+            inset 0 1px 0 rgba(255, 255, 255, 0.12),
+            inset 0 0 0 1px rgba(234, 88, 12, 0.18);
         }
-        .orb span { color: ${theme.orange}; }
+        .state-msg {
+          padding: 10px 14px;
+          font-size: 11px;
+          color: rgba(255, 255, 255, 0.88);
+          text-align: center;
+          max-width: min(320px, 90vw);
+          border-radius: 14px;
+          background: rgba(15, 15, 14, 0.45);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .state-msg strong { color: ${theme.orange}; font-weight: 600; }
       </style>
-      <div class="panel" part="panel">
-        <div class="head">
-          <div class="brand" title="Claude usage (unofficial)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" stroke="${theme.orange}" stroke-width="1.5" stroke-linejoin="round"/>
-              <path d="M12 22V12M12 12L4 7M12 12l8-5" stroke="${theme.muted}" stroke-width="1.2" stroke-linecap="round"/>
-            </svg>
-            Usage
+      <div class="ct-root" id="ct-root">
+        <div class="ct-surface ct-zone" id="ct-chip-5h">
+          <div class="ct-liquid ct-liquid--dark ct-row">
+            <span class="ct-lab">5H</span>
+            <div class="bar-h-wrap">
+              <div class="bar-track-h"><div class="bar-fill-h" id="ct-fill5h" style="width:0%"></div></div>
+            </div>
+            <span class="pct-h" id="ct-pct5h">—</span>
           </div>
-          <div class="actions">
-            <button type="button" class="icon-btn" id="ct-refresh" title="Refresh" aria-label="Refresh">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        </div>
+        <button type="button" class="ct-surface ct-zone ct-refresh-btn" id="ct-refresh" title="Refresh usage" aria-label="Refresh usage">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+            <path d="M3 3v5h5"/>
+            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+            <path d="M16 16h5v5"/>
+          </svg>
+        </button>
+        <div class="ct-surface ct-zone" id="ct-chip-7d">
+          <div class="ct-liquid ct-liquid--dark ct-row">
+            <span class="ct-lab">7D</span>
+            <div class="bar-h-wrap bar-h-wrap--7d">
+              <div class="bar-track-h"><div class="bar-fill-h bar-fill--7d" id="ct-fill7d" style="width:0%"></div></div>
+            </div>
+            <span class="pct-h" id="ct-pct7d">—</span>
+            <button type="button" class="ct-refresh-btn" id="ct-refresh" title="Refresh usage" aria-label="Refresh usage">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
                 <path d="M3 3v5h5"/>
                 <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
                 <path d="M16 16h5v5"/>
               </svg>
             </button>
-            <button type="button" class="icon-btn" id="ct-collapse" title="Minimize" aria-label="Minimize">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M4 14h16M4 10h16"/>
-              </svg>
-            </button>
           </div>
         </div>
-        <div class="body" id="ct-body">
-          <div class="state-msg" id="ct-state">Loading…</div>
+        <div class="ct-surface ct-zone" id="ct-chip-reset5">
+          <div class="ct-liquid ct-liquid--dark ct-reset-pill" id="ct-reset5">5h reset · —</div>
         </div>
-        <div class="mini hidden" id="ct-mini" aria-hidden="true">
-          <div class="orb" title="5h window"><span id="ct-m5">—</span></div>
-          <div class="orb" title="7d window"><span id="ct-m7">—</span></div>
+        <div class="ct-surface ct-zone" id="ct-chip-reset7">
+          <div class="ct-liquid ct-liquid--dark ct-reset-pill ct-reset-pill--r" id="ct-reset7">7d reset · —</div>
+        </div>
+        <div class="ct-surface ct-zone" id="ct-status-compact">
+          <div class="ct-liquid ct-liquid--dark ct-status-badge" id="ct-status5h">—</div>
+        </div>
+        <div class="ct-surface" id="ct-error" style="display:none">
+          <div class="state-msg" id="ct-error-msg"></div>
         </div>
       </div>
     `;
   }
 
+  const ZONE_IDS = [
+    "ct-chip-5h",
+    "ct-chip-7d",
+    "ct-chip-reset5",
+    "ct-chip-reset7",
+    "ct-status-compact",
+  ];
+
+  function isLikelyVisible(el) {
+    if (!el || !el.isConnected) return false;
+    const s = window.getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") {
+      return false;
+    }
+    const r = el.getBoundingClientRect();
+    return r.width > 40 && r.height > 40;
+  }
+
+  /** True if two axis-aligned rects intersect (using left/top/right/bottom). */
+  function rectsIntersect(a, b) {
+    return !(
+      a.right < b.left ||
+      a.left > b.right ||
+      a.bottom < b.top ||
+      a.top > b.bottom
+    );
+  }
+
+  /**
+   * Panels beside or stacked around the composer often do not share pixels with
+   * the chat box rect; inflate the composer rect so adjacent / stacked UI still triggers compact.
+   */
+  function inflatedChatRect(rect, padPx) {
+    return {
+      left: rect.left - padPx,
+      top: rect.top - padPx,
+      right: rect.right + padPx,
+      bottom: rect.bottom + padPx,
+    };
+  }
+
+  function hasCrowdingPanel(rect) {
+    const pad = 72;
+    const zone = inflatedChatRect(rect, pad);
+
+    const probes = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      /* Artifacts / stacked canvas (Claude mobile + overlays) */
+      '[class*="max-md:z-header"]',
+      '[class*="max-md:absolute"][class*="inset-x-0"]',
+      '[class*="max-md:top-0"][class*="inset-x-0"]',
+      '[aria-label*="artifact" i]',
+      '[aria-label*="canvas" i]',
+      '[aria-label*="sidebar" i]',
+      '[class*="artifact"]',
+      '[class*="sidebar"]',
+      '[class*="drawer"]',
+      '[data-testid*="artifact"]',
+      '[data-testid*="canvas"]',
+    ];
+
+    for (const sel of probes) {
+      let nodes;
+      try {
+        nodes = document.querySelectorAll(sel);
+      } catch (_) {
+        continue;
+      }
+      for (const el of nodes) {
+        if (!isLikelyVisible(el)) continue;
+        if (el.closest(`#${HOST_ID}`)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 72 || r.height < 36) continue;
+        const b = {
+          left: r.left,
+          top: r.top,
+          right: r.right,
+          bottom: r.bottom,
+        };
+        if (rectsIntersect(zone, b)) return true;
+      }
+    }
+    return false;
+  }
+
+  function shouldCompactLayout(rect) {
+    const leftGutter = rect.left;
+    const rightGutter = window.innerWidth - rect.right;
+    return (
+      rect.width < 620 ||
+      window.innerWidth < 1180 ||
+      leftGutter < 40 ||
+      rightGutter < 40 ||
+      hasCrowdingPanel(rect)
+    );
+  }
+
+  function layoutChatZones(shadow) {
+    const chip5 = shadow.getElementById("ct-chip-5h");
+    const chip7 = shadow.getElementById("ct-chip-7d");
+    const cr5 = shadow.getElementById("ct-chip-reset5");
+    const cr7 = shadow.getElementById("ct-chip-reset7");
+    const compact = shadow.getElementById("ct-status-compact");
+    const errEl = shadow.getElementById("ct-error");
+    if (!chip5 || !chip7 || !cr5 || !cr7 || !compact) return;
+
+    const el = getChatBoxElement();
+
+    if (el && el !== chatInputObservedEl) {
+      try {
+        chatInputResizeObs?.disconnect();
+        chatInputObservedEl = el;
+        chatInputResizeObs = new ResizeObserver(() => {
+          requestAnimationFrame(() => layoutChatZones(shadow));
+        });
+        chatInputResizeObs.observe(el);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    const hideAll = () => {
+      for (const id of ZONE_IDS) {
+        const n = shadow.getElementById(id);
+        if (n) n.style.display = "none";
+      }
+    };
+
+    if (!el || !el.isConnected) {
+      hideAll();
+      return;
+    }
+
+    const rect = normalizeRect(el.getBoundingClientRect());
+    if (rect.width < 64) {
+      hideAll();
+      return;
+    }
+
+    const compactMode = shouldCompactLayout(rect);
+    if (errEl && errEl.style.display !== "none") {
+      hideAll();
+      errEl.style.left = `${rect.left + rect.width / 2}px`;
+      errEl.style.top = `${rect.top + rect.height / 2}px`;
+      errEl.style.transform = "translate(-50%, -50%)";
+      errEl.style.zIndex = "2147483647";
+      return;
+    }
+
+    if (compactMode) {
+      chip5.style.display = "none";
+      chip7.style.display = "none";
+      cr5.style.display = "none";
+      cr7.style.display = "none";
+      compact.style.display = "";
+    } else {
+      chip5.style.display = "";
+      chip7.style.display = "";
+      cr5.style.display = "";
+      cr7.style.display = "";
+      compact.style.display = "none";
+    }
+
+    const chipH = 28;
+    const gapMid = 5;
+    const edgeGap = 4;
+    /** Reset row sits above the chat box */
+    const resetRowH = 30;
+    const resetY = rect.top - resetRowH - edgeGap;
+    /** Progress chips sit below the chat box */
+    const barsY = rect.bottom + edgeGap;
+
+    let w5 = Math.min(210, Math.max(120, rect.width * 0.44));
+    let w7 = Math.min(118, Math.max(88, rect.width * 0.28));
+    /* Refresh sits inside the 7D chip — only gap between 5H and 7D columns */
+    const need = w5 + gapMid + w7;
+    if (need > rect.width && rect.width > 0) {
+      const s = (rect.width / need) * 0.98;
+      w5 = Math.max(96, w5 * s);
+      w7 = Math.max(72, w7 * s);
+    }
+
+    chip5.style.left = `${rect.left}px`;
+    chip5.style.top = `${barsY}px`;
+    chip5.style.width = `${w5}px`;
+
+    chip7.style.left = `${rect.right - w7}px`;
+    chip7.style.top = `${barsY}px`;
+    chip7.style.width = `${w7}px`;
+
+    const g = 5;
+    const col = Math.max(120, (rect.width - g) / 2);
+    cr5.style.left = `${rect.left}px`;
+    cr5.style.top = `${resetY}px`;
+    cr5.style.width = `${col}px`;
+
+    cr7.style.left = `${rect.right - col}px`;
+    cr7.style.top = `${resetY}px`;
+    cr7.style.width = `${col}px`;
+
+    compact.style.left = `${rect.right - 42}px`;
+    compact.style.top = `${rect.bottom + edgeGap}px`;
+    compact.style.width = "42px";
+    compact.style.height = "42px";
+
+    if (errEl) {
+      errEl.style.left = `${rect.left + rect.width / 2}px`;
+      errEl.style.top = `${rect.top + rect.height / 2}px`;
+      errEl.style.transform = "translate(-50%, -50%)";
+      errEl.style.zIndex = "2147483647";
+    }
+  }
+
   function renderUsage(shadow, usage, usageError) {
-    const body = shadow.getElementById("ct-body");
-    const m5 = shadow.getElementById("ct-m5");
-    const m7 = shadow.getElementById("ct-m7");
+    const errWrap = shadow.getElementById("ct-error");
+    const errMsg = shadow.getElementById("ct-error-msg");
+    const fill5 = shadow.getElementById("ct-fill5h");
+    const fill7 = shadow.getElementById("ct-fill7d");
+    const pct5 = shadow.getElementById("ct-pct5h");
+    const pct7 = shadow.getElementById("ct-pct7d");
+    const reset5 = shadow.getElementById("ct-reset5");
+    const reset7 = shadow.getElementById("ct-reset7");
+    const status5 = shadow.getElementById("ct-status5h");
+
+    const showZones = (on) => {
+      for (const id of ZONE_IDS) {
+        const z = shadow.getElementById(id);
+        if (z) z.style.display = on ? "" : "none";
+      }
+    };
 
     if (
       usageError === "session" ||
       usageError === "no_org" ||
       usageError === "fetch"
     ) {
-      body.innerHTML = "";
-      const div = el(`
-        <div class="state-msg">
-          ${usageError === "session" ? "<strong>Session expired.</strong> Refresh the page and sign in again." : ""}
-          ${usageError === "no_org" ? "<strong>No org ID yet.</strong> Wait for Claude to finish loading, or refresh the page." : ""}
-          ${usageError === "fetch" ? "<strong>Could not load usage.</strong> Check your connection." : ""}
-        </div>
-      `);
-      body.appendChild(div);
-      m5.textContent = "—";
-      m7.textContent = "—";
+      showZones(false);
+      if (errWrap && errMsg) {
+        errWrap.style.display = "";
+        errMsg.innerHTML =
+          usageError === "session"
+            ? "<strong>Session expired.</strong> Refresh the page and sign in again."
+            : usageError === "no_org"
+              ? "<strong>No org ID yet.</strong> Wait for Claude to finish loading, or refresh."
+              : "<strong>Could not load usage.</strong> Check your connection.";
+      }
+      if (fill5) fill5.style.width = "0%";
+      if (fill7) fill7.style.width = "0%";
+      if (pct5) pct5.textContent = "—";
+      if (pct7) pct7.textContent = "—";
+      if (status5) status5.textContent = "—";
       return;
     }
 
+    if (errWrap) errWrap.style.display = "none";
+    showZones(true);
+
     if (!usage) {
-      body.innerHTML = '<div class="state-msg" id="ct-state">Loading…</div>';
+      if (fill5) fill5.style.width = "0%";
+      if (fill7) fill7.style.width = "0%";
+      if (pct5) pct5.textContent = "…";
+      if (pct7) pct7.textContent = "…";
+      if (reset5) reset5.textContent = "5h reset · …";
+      if (reset7) reset7.textContent = "7d reset · …";
+      if (status5) status5.textContent = "…";
       return;
     }
 
@@ -456,34 +731,13 @@
     const r5 = usage.five_hour?.resets_at;
     const r7 = usage.seven_day?.resets_at;
 
-    body.innerHTML = "";
-    body.appendChild(
-      el(`
-        <div>
-          <div class="row">
-            <div class="label">5h</div>
-            <div class="bar-wrap">
-              <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, h5)}%"></div></div>
-            </div>
-            <div class="pct">${Math.round(h5)}%</div>
-          </div>
-          <div class="row">
-            <div class="label">7d</div>
-            <div class="bar-wrap">
-              <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, h7)}%"></div></div>
-            </div>
-            <div class="pct">${Math.round(h7)}%</div>
-          </div>
-          <div class="meta">
-            <span class="pill" title="5h window reset">5h reset · ${formatCountdown(r5)}</span>
-            <span class="pill" title="Weekly reset">7d reset · ${formatCountdown(r7)}</span>
-          </div>
-        </div>
-      `),
-    );
-
-    m5.textContent = `${Math.round(h5)}%`;
-    m7.textContent = `${Math.round(h7)}%`;
+    if (fill5) fill5.style.width = `${Math.min(100, h5)}%`;
+    if (fill7) fill7.style.width = `${Math.min(100, h7)}%`;
+    if (pct5) pct5.textContent = `${Math.round(h5)}%`;
+    if (pct7) pct7.textContent = `${Math.round(h7)}%`;
+    if (reset5) reset5.textContent = `5h reset · ${formatCountdown(r5)}`;
+    if (reset7) reset7.textContent = `7d reset · ${formatCountdown(r7)}`;
+    if (status5) status5.textContent = `${Math.round(h5)}%`;
   }
 
   function mount() {
@@ -496,96 +750,94 @@
     appendHtmlToShadow(shadow, buildShadowHTML());
     document.documentElement.appendChild(host);
 
-    const body = shadow.getElementById("ct-body");
-    const mini = shadow.getElementById("ct-mini");
-    let collapsed = false;
+    const scheduleLayout = () => {
+      requestAnimationFrame(() => layoutChatZones(shadow));
+    };
 
-    shadow.getElementById("ct-collapse").addEventListener("click", () => {
-      collapsed = !collapsed;
-      body.classList.toggle("collapsed", collapsed);
-      mini.classList.toggle("hidden", !collapsed);
-      mini.setAttribute("aria-hidden", collapsed ? "false" : "true");
-      const btn = shadow.getElementById("ct-collapse");
-      btn.innerHTML = collapsed
-        ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5v14l11-7-11-7z"/></svg>`
-        : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 14h16M4 10h16"/></svg>`;
-      btn.title = collapsed ? "Expand" : "Minimize";
-      btn.setAttribute("aria-label", collapsed ? "Expand" : "Minimize");
-    });
-
-    shadow.getElementById("ct-refresh").addEventListener("click", () => {
+    shadow.getElementById("ct-refresh")?.addEventListener("click", () => {
       fetchUsagePage().then(() => paintFromStorage());
     });
 
     async function paintFromStorage() {
-      const { usage, usageError, lastUpdated } = await stGet([
-        "usage",
-        "usageError",
-        "lastUpdated",
-      ]);
+      const { usage, usageError } = await stGet(["usage", "usageError"]);
       renderUsage(shadow, usage, usageError);
-      shadow.getElementById("ct-updated")?.remove();
-      if (usage && !usageError && lastUpdated) {
-        const agoSec = Math.round((Date.now() - lastUpdated) / 1000);
-        const agoLabel =
-          agoSec < 60
-            ? `${agoSec}s`
-            : agoSec < 3600
-              ? `${Math.floor(agoSec / 60)}m`
-              : `${Math.floor(agoSec / 3600)}h`;
-        const sub = el(
-          `<div id="ct-updated" style="margin-top:6px;font-size:9px;color:${theme.muted};text-align:right">Updated ${agoLabel} ago</div>`,
-        );
-        body.appendChild(sub);
-      }
+      scheduleLayout();
     }
 
     const unsubStorage = subscribeStorage((changes, area) => {
       if (area !== "local") return;
-      if (changes.usage || changes.usageError || changes.lastUpdated) {
+      if (changes.usage || changes.usageError) {
         paintFromStorage();
       }
     });
 
-    const updatedTicker = setInterval(() => {
-      stGet(["usage", "usageError", "lastUpdated"]).then(
-        ({ usage, usageError, lastUpdated }) => {
-          if (!usage || usageError || !lastUpdated) return;
-          const elUp = shadow.getElementById("ct-updated");
-          if (!elUp) return;
-          const agoSec = Math.round((Date.now() - lastUpdated) / 1000);
-          const agoLabel =
-            agoSec < 60
-              ? `${agoSec}s`
-              : agoSec < 3600
-                ? `${Math.floor(agoSec / 60)}m`
-                : `${Math.floor(agoSec / 3600)}h`;
-          elUp.textContent = `Updated ${agoLabel} ago`;
-        },
-      );
-    }, 15000);
-
     const countdown = setInterval(() => {
       stGet("usage").then(({ usage: u }) => {
-        if (!u || collapsed) return;
-        const meta = shadow.querySelector(".meta");
-        if (!meta) return;
+        if (!u) return;
         const r5 = u.five_hour?.resets_at;
         const r7 = u.seven_day?.resets_at;
-        const pills = meta.querySelectorAll(".pill");
-        if (pills[0])
-          pills[0].textContent = `5h reset · ${formatCountdown(r5)}`;
-        if (pills[1])
-          pills[1].textContent = `7d reset · ${formatCountdown(r7)}`;
+        const rs5 = shadow.getElementById("ct-reset5");
+        const rs7 = shadow.getElementById("ct-reset7");
+        if (rs5) rs5.textContent = `5h reset · ${formatCountdown(r5)}`;
+        if (rs7) rs7.textContent = `7d reset · ${formatCountdown(r7)}`;
       });
     }, 1000);
 
+    let resizeObs = null;
+    try {
+      resizeObs = new ResizeObserver(scheduleLayout);
+      resizeObs.observe(document.documentElement);
+      if (document.body) resizeObs.observe(document.body);
+    } catch (_) {
+      /* ignore */
+    }
+
+    window.addEventListener("resize", scheduleLayout, { passive: true });
+    window.addEventListener("scroll", scheduleLayout, {
+      passive: true,
+      capture: true,
+    });
+
+    let domMoTimer = null;
+    let domObserver = null;
+    try {
+      domObserver = new MutationObserver(() => {
+        clearTimeout(domMoTimer);
+        domMoTimer = setTimeout(scheduleLayout, 60);
+      });
+      domObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style", "hidden", "aria-hidden"],
+      });
+    } catch (_) {
+      /* ignore */
+    }
+
     window.addEventListener("beforeunload", () => {
-      clearInterval(updatedTicker);
       clearInterval(countdown);
       clearNoOrgTimer();
       clearLocationPoll();
+      clearTimeout(domMoTimer);
       unsubStorage();
+      try {
+        domObserver?.disconnect();
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        resizeObs?.disconnect();
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        chatInputResizeObs?.disconnect();
+        chatInputResizeObs = null;
+        chatInputObservedEl = null;
+      } catch (_) {
+        /* ignore */
+      }
       try {
         perfObserver?.disconnect();
       } catch (_) {
