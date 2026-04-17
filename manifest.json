@@ -3,7 +3,7 @@
   "name": "Claude Usage Tracker",
   "version": "0.1.0",
   "description": "Shows Claude.ai usage (5h / 7d) in a small overlay on claude.ai.",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "tabs"],
   "host_permissions": ["https://claude.ai/*"],
   "background": {
     "service_worker": "background.js"

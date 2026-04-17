@@ -1,6 +1,48 @@
 (() => {
   const HOST_ID = "claude-tracker-usage-host";
 
+  /** Some environments omit `chrome.storage` on content scripts; proxy via background. */
+  const canStorage = (() => {
+    try {
+      const s = globalThis.chrome?.storage?.local;
+      return !!(s && typeof s.get === "function" && typeof s.set === "function");
+    } catch (_) {
+      return false;
+    }
+  })();
+
+  async function stGet(keys) {
+    if (canStorage) return globalThis.chrome.storage.local.get(keys);
+    const r = await globalThis.chrome.runtime.sendMessage({
+      type: "STORAGE_GET",
+      keys,
+    });
+    return r ?? {};
+  }
+
+  async function stSet(data) {
+    if (canStorage) return globalThis.chrome.storage.local.set(data);
+    await globalThis.chrome.runtime.sendMessage({
+      type: "STORAGE_SET",
+      data,
+    });
+  }
+
+  function subscribeStorage(handler) {
+    if (canStorage) {
+      const fn = (changes, area) => {
+        if (area === "local") handler(changes, area);
+      };
+      globalThis.chrome.storage.onChanged.addListener(fn);
+      return () => globalThis.chrome.storage.onChanged.removeListener(fn);
+    }
+    const fn = (msg) => {
+      if (msg?.type === "STORAGE_CHANGED") handler(msg.changes, msg.area);
+    };
+    globalThis.chrome.runtime.onMessage.addListener(fn);
+    return () => globalThis.chrome.runtime.onMessage.removeListener(fn);
+  }
+
   const theme = {
     bg: "#141413",
     bgElevated: "#1c1c1a",
@@ -85,11 +127,8 @@
 
   async function persistOrgId(id) {
     if (!id) return;
-    const { orgId: prev, usage } = await chrome.storage.local.get([
-      "orgId",
-      "usage",
-    ]);
-    await chrome.storage.local.set({ orgId: id });
+    const { orgId: prev, usage } = await stGet(["orgId", "usage"]);
+    await stSet({ orgId: id });
     clearNoOrgTimer();
     clearLocationPoll();
 
@@ -129,9 +168,9 @@
     clearNoOrgTimer();
     noOrgTimerId = setTimeout(async () => {
       noOrgTimerId = null;
-      const { orgId } = await chrome.storage.local.get("orgId");
+      const { orgId } = await stGet("orgId");
       if (!orgId) {
-        await chrome.storage.local.set({
+        await stSet({
           usageError: "no_org",
           lastUpdated: Date.now(),
         });
@@ -172,14 +211,14 @@
   }
 
   async function fetchUsagePage() {
-    const { orgId } = await chrome.storage.local.get("orgId");
+    const { orgId } = await stGet("orgId");
     if (!orgId) return;
 
     const res = await fetch(`/api/organizations/${orgId}/usage`, {
       credentials: "include",
     });
     if (!res.ok) {
-      await chrome.storage.local.set({
+      await stSet({
         usageError: res.status === 401 || res.status === 403 ? "session" : "fetch",
         lastUpdated: Date.now(),
       });
@@ -187,7 +226,7 @@
     }
 
     const data = await res.json();
-    await chrome.storage.local.set({
+    await stSet({
       usage: data,
       usageError: null,
       lastUpdated: Date.now(),
@@ -461,7 +500,7 @@
     });
 
     async function paintFromStorage() {
-      const { usage, usageError, lastUpdated } = await chrome.storage.local.get([
+      const { usage, usageError, lastUpdated } = await stGet([
         "usage",
         "usageError",
         "lastUpdated",
@@ -483,7 +522,7 @@
       }
     }
 
-    chrome.storage.onChanged.addListener((changes, area) => {
+    const unsubStorage = subscribeStorage((changes, area) => {
       if (area !== "local") return;
       if (changes.usage || changes.usageError || changes.lastUpdated) {
         paintFromStorage();
@@ -491,7 +530,7 @@
     });
 
     const updatedTicker = setInterval(() => {
-      chrome.storage.local.get(["usage", "usageError", "lastUpdated"]).then(
+      stGet(["usage", "usageError", "lastUpdated"]).then(
         ({ usage, usageError, lastUpdated }) => {
           if (!usage || usageError || !lastUpdated) return;
           const elUp = shadow.getElementById("ct-updated");
@@ -509,7 +548,7 @@
     }, 15000);
 
     const countdown = setInterval(() => {
-      chrome.storage.local.get("usage").then(({ usage: u }) => {
+      stGet("usage").then(({ usage: u }) => {
         if (!u || collapsed) return;
         const meta = shadow.querySelector(".meta");
         if (!meta) return;
@@ -528,6 +567,7 @@
       clearInterval(countdown);
       clearNoOrgTimer();
       clearLocationPoll();
+      unsubStorage();
       try {
         perfObserver?.disconnect();
       } catch (_) {
@@ -539,11 +579,14 @@
     paintFromStorage();
   }
 
-  startOrgDiscovery();
+  function boot() {
+    mount();
+    startOrgDiscovery();
+  }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mount, { once: true });
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
-    mount();
+    boot();
   }
 })();
