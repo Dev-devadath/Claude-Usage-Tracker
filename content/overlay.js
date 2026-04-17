@@ -5,7 +5,11 @@
   const canStorage = (() => {
     try {
       const s = globalThis.chrome?.storage?.local;
-      return !!(s && typeof s.get === "function" && typeof s.set === "function");
+      return !!(
+        s &&
+        typeof s.get === "function" &&
+        typeof s.set === "function"
+      );
     } catch (_) {
       return false;
     }
@@ -219,7 +223,8 @@
     });
     if (!res.ok) {
       await stSet({
-        usageError: res.status === 401 || res.status === 403 ? "session" : "fetch",
+        usageError:
+          res.status === 401 || res.status === 403 ? "session" : "fetch",
         lastUpdated: Date.now(),
       });
       return;
@@ -241,10 +246,13 @@
         * { box-sizing: border-box; }
         .panel {
           position: fixed;
-          top: max(12px, env(safe-area-inset-top, 0px));
-          right: max(12px, env(safe-area-inset-right, 0px));
+          bottom: max(12px, env(safe-area-inset-bottom, 0px));
+          left: 10px;
+          right: auto;
+          top: auto;
           z-index: 2147483646;
           min-width: 200px;
+          /* Sits in the strip between Claude’s left sidebar and the chat column */
           max-width: min(280px, calc(100vw - 24px));
           background: ${theme.bg};
           border: 1px solid ${theme.border};
@@ -255,6 +263,12 @@
           line-height: 1.35;
           overflow: hidden;
           backdrop-filter: blur(10px);
+        }
+        @media (min-width: 768px) {
+          .panel {
+            left: 200px;
+            max-width: min(280px, calc(100vw - 252px));
+          }
         }
         .head {
           display: flex;
@@ -413,7 +427,11 @@
     const m5 = shadow.getElementById("ct-m5");
     const m7 = shadow.getElementById("ct-m7");
 
-    if (usageError === "session" || usageError === "no_org" || usageError === "fetch") {
+    if (
+      usageError === "session" ||
+      usageError === "no_org" ||
+      usageError === "fetch"
+    ) {
       body.innerHTML = "";
       const div = el(`
         <div class="state-msg">
